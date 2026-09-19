@@ -25,7 +25,7 @@ class SupabaseManager {
     const envUrl = (typeof import.meta !== 'undefined' && import.meta.env ? import.meta.env.VITE_SUPABASE_URL || '' : '').trim();
     const envKey = (typeof import.meta !== 'undefined' && import.meta.env ? import.meta.env.VITE_SUPABASE_ANON_KEY || '' : '').trim();
 
-    const activeUrl = localUrl || envUrl;
+    const activeUrl = this.cleanUrl(localUrl || envUrl);
     const activeKey = localKey || envKey;
     const source = localUrl && localKey ? 'localStorage' : (envUrl && envKey ? 'env' : 'none');
 
@@ -35,6 +35,17 @@ class SupabaseManager {
       isConfigured: Boolean(activeUrl && activeKey && this.isValidUrl(activeUrl)),
       source
     };
+  }
+
+  cleanUrl(string) {
+    if (!string || typeof string !== 'string') return '';
+    let url = string.trim();
+    // Remove trailing slashes
+    url = url.replace(/\/+$/, '');
+    // Strip REST API suffix if user copied the REST endpoint URL from Supabase dashboard
+    url = url.replace(/\/rest\/v1\/?$/i, '');
+    url = url.replace(/\/+$/, '');
+    return url;
   }
 
   isValidUrl(string) {
@@ -81,7 +92,7 @@ class SupabaseManager {
    * Save Supabase credentials from UI settings (persisted in localStorage)
    */
   saveConfig(url, anonKey) {
-    const cleanUrl = (url || '').trim();
+    const cleanUrl = this.cleanUrl(url);
     const cleanKey = (anonKey || '').trim();
 
     if (typeof localStorage !== 'undefined') {
@@ -116,7 +127,7 @@ class SupabaseManager {
     let testClient = this.client;
 
     if (customUrl !== null || customKey !== null) {
-      const targetUrl = (customUrl ?? this.getConfig().url).trim();
+      const targetUrl = this.cleanUrl(customUrl ?? this.getConfig().url);
       const targetKey = (customKey ?? this.getConfig().anonKey).trim();
 
       if (!targetUrl || !targetKey) {

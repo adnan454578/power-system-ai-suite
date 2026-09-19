@@ -733,8 +733,12 @@ export default function ChatContainer({ gridSnapshot, onTriggerGridEvent, onNavi
   const handleTestSupabase = async () => {
     setIsTestingSupabase(true);
     setSupabaseTestStatus(null);
+    const cleanedUrl = supabaseManager.cleanUrl(supabaseUrlInput);
+    if (cleanedUrl && cleanedUrl !== supabaseUrlInput) {
+      setSupabaseUrlInput(cleanedUrl);
+    }
     try {
-      const res = await supabaseManager.testConnection(supabaseUrlInput, supabaseKeyInput);
+      const res = await supabaseManager.testConnection(cleanedUrl || supabaseUrlInput, supabaseKeyInput);
       setSupabaseTestStatus(res);
     } catch (e) {
       setSupabaseTestStatus({ success: false, message: e.message });
@@ -744,7 +748,11 @@ export default function ChatContainer({ gridSnapshot, onTriggerGridEvent, onNavi
   };
 
   const handleSaveSupabaseConfig = async () => {
-    supabaseManager.saveConfig(supabaseUrlInput, supabaseKeyInput);
+    const cleanedUrl = supabaseManager.cleanUrl(supabaseUrlInput);
+    if (cleanedUrl && cleanedUrl !== supabaseUrlInput) {
+      setSupabaseUrlInput(cleanedUrl);
+    }
+    supabaseManager.saveConfig(cleanedUrl || supabaseUrlInput, supabaseKeyInput);
     setTrainerStatusMsg('💾 Supabase credentials saved! Syncing with cloud database…');
     try {
       const syncRes = await knowledgeBaseService.syncFromSupabase();
@@ -1269,6 +1277,9 @@ CREATE INDEX IF NOT EXISTS idx_trained_topics_updated_at ON public.trained_topic
                 <div style={{ marginBottom: '12px' }}>
                   <label style={{ fontSize: '0.75rem', fontWeight: 700, color: 'var(--text-primary)', display: 'block', marginBottom: '4px' }}>
                     Supabase Project URL:
+                    <span style={{ fontSize: '0.68rem', color: 'var(--text-muted)', fontWeight: 400, marginLeft: '6px' }}>
+                      (Base URL like <code>https://xyz.supabase.co</code> — do NOT include <code>/rest/v1</code>)
+                    </span>
                   </label>
                   <input
                     type="text"
@@ -1276,6 +1287,12 @@ CREATE INDEX IF NOT EXISTS idx_trained_topics_updated_at ON public.trained_topic
                     onChange={(e) => {
                       setSupabaseUrlInput(e.target.value);
                       setSupabaseTestStatus(null);
+                    }}
+                    onBlur={(e) => {
+                      const cleaned = supabaseManager.cleanUrl(e.target.value);
+                      if (cleaned && cleaned !== e.target.value) {
+                        setSupabaseUrlInput(cleaned);
+                      }
                     }}
                     placeholder="https://your-project.supabase.co"
                     style={{
@@ -1632,6 +1649,9 @@ CREATE INDEX IF NOT EXISTS idx_trained_topics_updated_at ON public.trained_topic
                     <div>
                       <label style={{ fontSize: '0.74rem', fontWeight: 700, color: 'var(--text-primary)', display: 'block', marginBottom: '4px' }}>
                         Supabase Project URL:
+                        <span style={{ fontSize: '0.68rem', color: 'var(--text-muted)', fontWeight: 400, marginLeft: '6px' }}>
+                          (Base URL like <code>https://xyz.supabase.co</code> — do NOT include <code>/rest/v1</code>)
+                        </span>
                       </label>
                       <input
                         type="text"
@@ -1639,6 +1659,12 @@ CREATE INDEX IF NOT EXISTS idx_trained_topics_updated_at ON public.trained_topic
                         onChange={(e) => {
                           setSupabaseUrlInput(e.target.value);
                           setSupabaseTestStatus(null);
+                        }}
+                        onBlur={(e) => {
+                          const cleaned = supabaseManager.cleanUrl(e.target.value);
+                          if (cleaned && cleaned !== e.target.value) {
+                            setSupabaseUrlInput(cleaned);
+                          }
                         }}
                         placeholder="https://your-project-id.supabase.co"
                         style={{
