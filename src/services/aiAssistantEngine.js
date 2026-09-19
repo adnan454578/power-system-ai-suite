@@ -27,9 +27,13 @@ export async function processChatMessage(userMessage, currentContext = {}) {
     const category = (trainMatch[2] || 'Chat Trained').trim();
     const content = trainMatch[3].trim();
     try {
-      const added = knowledgeBaseService.addTopic({ title, category, content });
+      const added = await knowledgeBaseService.addTopic({ title, category, content });
+      const storageBadge = added.source === 'cloud' 
+        ? '☁️ **Supabase Cloud Database (PostgreSQL)**' 
+        : '💾 **Local Cache (Connect Supabase to sync across devices)**';
       return buildBotMsg(
         `🎓 **Topic Trained Successfully into GridMind Knowledge Base!**\n\n` +
+        `• **Storage Location:** ${storageBadge}\n` +
         `• **Title:** \`${added.title}\`\n` +
         `• **Category:** \`${added.category}\`\n` +
         `• **Learned Content:**\n> ${added.content.replace(/\n/g, '\n> ')}\n\n` +

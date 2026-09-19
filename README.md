@@ -59,11 +59,18 @@ git clone https://github.com/adnan454578/power-system-ai-suite.git
 cd power-system-ai-suite
 # 2️⃣ Install dependencies
 npm install
-# 3️⃣ (Optional) Create a .env file for API keys
+# 3️⃣ (Optional) Create a .env file for API keys & Supabase
 #    Example:
-#    GEMINI_API_KEY=your‑gemini‑api‑key
-#    NODE_ENV=development
-NOTE – The app ships with a fallback “offline engineering engine” so you can run it locally without an API key, but providing one unlocks the full LLM capabilities.
+#    VITE_GEMINI_API_KEY=your‑gemini‑api‑key
+#    VITE_SUPABASE_URL=https://your-project.supabase.co
+#    VITE_SUPABASE_ANON_KEY=your-supabase-anon-key
+
+# 4️⃣ (Optional) Setup Supabase for Train Mode (Knowledge Base)
+#    - Create a Supabase project at https://supabase.com
+#    - Run the schema script in `supabase_schema.sql` via Supabase SQL Editor
+#    - Enter your Project URL & Anon Key in .env or directly in the UI (Train GridMind > Supabase Settings)
+
+NOTE – The app ships with a fallback “offline engineering engine” and local browser storage so you can run it locally without an API key or Supabase database, but connecting them unlocks cloud persistence and full LLM capabilities.
 
 Development Workflow
 Create a new branch: git checkout -b feat/your‑feature

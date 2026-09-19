@@ -32,13 +32,19 @@ import {
   FileUp,
   FileSpreadsheet,
   FileCode,
-  ArrowRight
+  ArrowRight,
+  Database,
+  Cloud,
+  Copy,
+  ExternalLink,
+  HardDrive
 } from 'lucide-react';
 import ChatMessage from './ChatMessage';
 import { processChatMessage } from '../../services/aiAssistantEngine';
 import { fileReaderService } from '../../services/multiModalFileReader';
 import { llmService, AVAILABLE_MODELS } from '../../services/llmService';
 import { knowledgeBaseService } from '../../services/knowledgeBaseService';
+import { supabaseManager } from '../../services/supabaseClient';
 
 const SAMPLE_CSV = `Timestamp,LineVoltage_kV,Current_A,ActivePower_MW,ReactivePower_MVAr,Frequency_Hz,MachineSpeed_RPM,PowerFactor
 00:00,15.74,13200,310.5,160.2,50.01,3000.6,0.889
@@ -222,6 +228,26 @@ export default function ChatContainer({ gridSnapshot, onTriggerGridEvent, onNavi
   const [trainerFile, setTrainerFile] = useState(null);
   const [isProcessingTrainerFile, setIsProcessingTrainerFile] = useState(false);
   const [isDraggingTrainerFile, setIsDraggingTrainerFile] = useState(false);
+
+  // Supabase Database State for Train Mode
+  const [showDbConfig, setShowDbConfig] = useState(false);
+  const [supabaseUrlInput, setSupabaseUrlInput] = useState(supabaseManager.getConfig().url);
+  const [supabaseKeyInput, setSupabaseKeyInput] = useState(supabaseManager.getConfig().anonKey);
+  const [supabaseTestStatus, setSupabaseTestStatus] = useState(null);
+  const [isTestingSupabase, setIsTestingSupabase] = useState(false);
+  const [isSyncingSupabase, setIsSyncingSupabase] = useState(false);
+  const [copiedSql, setCopiedSql] = useState(false);
+  const [dbStats, setDbStats] = useState(knowledgeBaseService.getStatus());
+  const [settingsTab, setSettingsTab] = useState('gemini'); // 'gemini' | 'supabase'
+
+  // Reactive subscription to Knowledge Base status & cloud sync
+  useEffect(() => {
+    const unsub = knowledgeBaseService.subscribe((status) => {
+      setTrainedTopics(knowledgeBaseService.getTopics());
+      setDbStats(status);
+    });
+    return unsub;
+  }, []);
 
   const fileInputRef = useRef(null);
   const trainerFileInputRef = useRef(null);
@@ -573,14 +599,20 @@ export default function ChatContainer({ gridSnapshot, onTriggerGridEvent, onNavi
             : 'Engineering Knowledge';
         
         const ext = file.name.split('.').pop()?.toLowerCase() || 'data';
-        knowledgeBaseService.addTopic({
+        const added = await knowledgeBaseService.addTopic({
           title: autoTitle,
           category: autoCat,
           tags: [processed.fileType.toLowerCase(), 'file-upload', ext],
-          content
+          content,
+          metadata: {
+            fileName: processed.fileName,
+            fileType: processed.fileType,
+            fileSizeKb: processed.fileSizeKb
+          }
         });
         setTrainedTopics(knowledgeBaseService.getTopics());
-        setTrainerStatusMsg(`🎉 Auto-Trained "${autoTitle}" from file directly into GridMind!`);
+        const loc = added?.source === 'cloud' ? 'Supabase Cloud Database' : 'Local Knowledge Base';
+        setTrainerStatusMsg(`🎉 Auto-Trained "${autoTitle}" from file directly into ${loc}!`);
         setTimeout(() => setTrainerStatusMsg(''), 5000);
       } else {
         if (!newTopicTitle.trim()) {
@@ -629,7 +661,7 @@ export default function ChatContainer({ gridSnapshot, onTriggerGridEvent, onNavi
   };
 
   // Knowledge Base Topic Handlers
-  const handleSaveTopic = () => {
+  const handleSaveTopic = async () => {
     if (!newTopicTitle.trim() || !newTopicContent.trim()) {
       setTrainerStatusMsg('⚠️ Title and Content are required.');
       return;
@@ -637,7 +669,7 @@ export default function ChatContainer({ gridSnapshot, onTriggerGridEvent, onNavi
 
     try {
       if (editingTopicId) {
-        knowledgeBaseService.updateTopic(editingTopicId, {
+        await knowledgeBaseService.updateTopic(editingTopicId, {
           title: newTopicTitle,
           category: newTopicCategory,
           tags: newTopicTags,
@@ -645,23 +677,25 @@ export default function ChatContainer({ gridSnapshot, onTriggerGridEvent, onNavi
         });
         setTrainerStatusMsg('✅ Topic updated successfully!');
       } else {
-        knowledgeBaseService.addTopic({
+        const added = await knowledgeBaseService.addTopic({
           title: newTopicTitle,
           category: newTopicCategory,
           tags: newTopicTags,
           content: newTopicContent
         });
-        setTrainerStatusMsg('✅ Topic trained successfully into knowledge base!');
+        const target = added.source === 'cloud' ? 'Supabase cloud database' : 'local knowledge base';
+        setTrainerStatusMsg(`✅ Topic trained and saved to ${target}!`);
       }
 
       setTrainedTopics(knowledgeBaseService.getTopics());
+      setDbStats(knowledgeBaseService.getStatus());
       setNewTopicTitle('');
       setNewTopicCategory('Power Engineering');
       setNewTopicTags('');
       setNewTopicContent('');
       setEditingTopicId(null);
       setTrainerFile(null);
-      setTimeout(() => setTrainerStatusMsg(''), 3000);
+      setTimeout(() => setTrainerStatusMsg(''), 3500);
     } catch (e) {
       setTrainerStatusMsg(`⚠️ Error: ${e.message}`);
     }
@@ -677,9 +711,10 @@ export default function ChatContainer({ gridSnapshot, onTriggerGridEvent, onNavi
     setTrainerStatusMsg('Editing topic. Modify below and click "Save Topic".');
   };
 
-  const handleDeleteTopic = (id) => {
-    knowledgeBaseService.deleteTopic(id);
+  const handleDeleteTopic = async (id) => {
+    await knowledgeBaseService.deleteTopic(id);
     setTrainedTopics(knowledgeBaseService.getTopics());
+    setDbStats(knowledgeBaseService.getStatus());
     if (editingTopicId === id) {
       setEditingTopicId(null);
       setNewTopicTitle('');
@@ -693,6 +728,101 @@ export default function ChatContainer({ gridSnapshot, onTriggerGridEvent, onNavi
     setShowTrainer(false);
     handleSendMessage(`Tell me all details about ${topic.title}`);
   };
+
+  // ── Supabase Cloud Database Handlers ──
+  const handleTestSupabase = async () => {
+    setIsTestingSupabase(true);
+    setSupabaseTestStatus(null);
+    try {
+      const res = await supabaseManager.testConnection(supabaseUrlInput, supabaseKeyInput);
+      setSupabaseTestStatus(res);
+    } catch (e) {
+      setSupabaseTestStatus({ success: false, message: e.message });
+    } finally {
+      setIsTestingSupabase(false);
+    }
+  };
+
+  const handleSaveSupabaseConfig = async () => {
+    supabaseManager.saveConfig(supabaseUrlInput, supabaseKeyInput);
+    setTrainerStatusMsg('💾 Supabase credentials saved! Syncing with cloud database…');
+    try {
+      const syncRes = await knowledgeBaseService.syncFromSupabase();
+      if (syncRes.success) {
+        setTrainerStatusMsg(`✅ Synced with Supabase! (${syncRes.count} cloud topics loaded)`);
+        setSupabaseTestStatus({ success: true, message: `Connected! ${syncRes.count} topics loaded from cloud.` });
+      } else {
+        setTrainerStatusMsg(`⚠️ Credentials saved, but sync failed: ${syncRes.error || syncRes.message}`);
+      }
+    } catch (e) {
+      setTrainerStatusMsg(`⚠️ Error connecting to Supabase: ${e.message}`);
+    }
+    setDbStats(knowledgeBaseService.getStatus());
+    setTrainedTopics(knowledgeBaseService.getTopics());
+    setTimeout(() => setTrainerStatusMsg(''), 4000);
+  };
+
+  const handleDisconnectSupabase = () => {
+    supabaseManager.clearConfig();
+    setSupabaseUrlInput('');
+    setSupabaseKeyInput('');
+    setSupabaseTestStatus(null);
+    setTrainerStatusMsg('Disconnected from Supabase. GridMind will use local storage.');
+    setDbStats(knowledgeBaseService.getStatus());
+    setTimeout(() => setTrainerStatusMsg(''), 3000);
+  };
+
+  const handleSyncLocalToSupabase = async () => {
+    if (!supabaseManager.isConfigured()) {
+      setTrainerStatusMsg('⚠️ Supabase is not configured yet. Please enter your URL and Anon Key first.');
+      return;
+    }
+    setIsSyncingSupabase(true);
+    setTrainerStatusMsg('☁️ Syncing all local topics to Supabase table…');
+    try {
+      const res = await knowledgeBaseService.syncLocalToSupabase();
+      setTrainerStatusMsg(`🎉 Successfully uploaded ${res.count} topics to Supabase cloud!`);
+      setTrainedTopics(knowledgeBaseService.getTopics());
+      setDbStats(knowledgeBaseService.getStatus());
+    } catch (err) {
+      setTrainerStatusMsg(`⚠️ Failed to sync to Supabase: ${err.message}`);
+    } finally {
+      setIsSyncingSupabase(false);
+      setTimeout(() => setTrainerStatusMsg(''), 5000);
+    }
+  };
+
+  const handleCopySqlSchema = () => {
+    const sql = `-- ============================================================================
+-- GridMind AI - Supabase Database Schema for Train Mode
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS public.trained_topics (
+  id TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  category TEXT NOT NULL DEFAULT 'General',
+  tags TEXT[] NOT NULL DEFAULT '{}',
+  content TEXT NOT NULL,
+  source TEXT DEFAULT 'cloud',
+  metadata JSONB DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+ALTER TABLE public.trained_topics ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Allow anon read trained_topics" ON public.trained_topics FOR SELECT TO anon, authenticated USING (true);
+CREATE POLICY "Allow anon insert trained_topics" ON public.trained_topics FOR INSERT TO anon, authenticated WITH CHECK (true);
+CREATE POLICY "Allow anon update trained_topics" ON public.trained_topics FOR UPDATE TO anon, authenticated USING (true) WITH CHECK (true);
+CREATE POLICY "Allow anon delete trained_topics" ON public.trained_topics FOR DELETE TO anon, authenticated USING (true);
+
+CREATE INDEX IF NOT EXISTS idx_trained_topics_category ON public.trained_topics (category);
+CREATE INDEX IF NOT EXISTS idx_trained_topics_updated_at ON public.trained_topics (updated_at DESC);`;
+
+    navigator.clipboard.writeText(sql);
+    setCopiedSql(true);
+    setTimeout(() => setCopiedSql(false), 3000);
+  };
+
 
   const filteredTopics = trainedTopics.filter(t => {
     if (!searchTopicQuery.trim()) return true;
@@ -980,112 +1110,271 @@ export default function ChatContainer({ gridSnapshot, onTriggerGridEvent, onNavi
           justifyContent: 'center',
           padding: '16px'
         }}>
-          <div className="glass-panel" style={{ maxWidth: '520px', width: '100%', padding: '24px', borderRadius: '16px', boxShadow: '0 10px 30px rgba(0,0,0,0.15)' }}>
+          <div className="glass-panel" style={{ maxWidth: '540px', width: '100%', padding: '24px', borderRadius: '16px', boxShadow: '0 10px 30px rgba(0,0,0,0.15)' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px' }}>
               <h4 style={{ fontSize: '1.05rem', fontWeight: 800, color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <Key size={18} color="var(--accent-forest)" /> Generative AI Settings & Diagnostics
+                <Settings size={18} color="var(--accent-forest)" /> System Configuration & AI Services
               </h4>
               <button onClick={() => setShowSettings(false)} style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--text-muted)' }}>
                 <X size={18} />
               </button>
             </div>
 
-            <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '14px', lineHeight: '1.5' }}>
-              Enter your Google Gemini API key (from <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer" style={{ color: 'var(--accent-forest)', textDecoration: 'underline' }}>Google AI Studio</a>).
-              GridMind will automatically use Gemini 2.0 Flash / 1.5 Flash with image vision, trained knowledge base injection, and automatic model failover.
-            </p>
-
-            <div style={{ marginBottom: '14px' }}>
-              <label style={{ fontSize: '0.75rem', fontWeight: 700, color: 'var(--text-primary)', display: 'block', marginBottom: '6px' }}>
-                Gemini API Key:
-              </label>
-              <input
-                type="password"
-                value={apiKeyInput}
-                onChange={(e) => {
-                  setApiKeyInput(e.target.value);
-                  setTestResult(null);
-                }}
-                placeholder="AIzaSy..."
-                style={{
-                  width: '100%',
-                  padding: '10px 12px',
-                  borderRadius: '8px',
-                  border: '1px solid var(--border-subtle)',
-                  background: '#F8FAFC',
-                  fontSize: '0.85rem',
-                  outline: 'none',
-                  fontFamily: 'monospace'
-                }}
-              />
-            </div>
-
-            <div style={{ marginBottom: '14px' }}>
-              <label style={{ fontSize: '0.75rem', fontWeight: 700, color: 'var(--text-primary)', display: 'block', marginBottom: '6px' }}>
-                Active Gemini Model:
-              </label>
-              <select
-                value={selectedModel}
-                onChange={(e) => {
-                  setSelectedModel(e.target.value);
-                  setTestResult(null);
-                }}
-                style={{
-                  width: '100%',
-                  padding: '9px 12px',
-                  borderRadius: '8px',
-                  border: '1px solid var(--border-subtle)',
-                  background: '#FFFFFF',
-                  fontSize: '0.82rem',
-                  outline: 'none',
-                  color: 'var(--text-primary)',
-                  fontWeight: 600,
-                  cursor: 'pointer'
-                }}
-              >
-                {AVAILABLE_MODELS.map(m => (
-                  <option key={m.id} value={m.id}>
-                    {m.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            {/* Test Connection Button & Result Banner */}
-            <div style={{ marginBottom: '16px' }}>
+            {/* Sub-Tabs: Gemini AI vs Supabase Database */}
+            <div style={{ display: 'flex', gap: '8px', borderBottom: '1px solid var(--border-subtle)', marginBottom: '16px', paddingBottom: '6px' }}>
               <button
-                onClick={handleTestApiKey}
-                disabled={isTestingKey || !apiKeyInput.trim()}
-                className="btn-secondary"
-                style={{ fontSize: '0.78rem', padding: '6px 12px', width: '100%', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '6px' }}
-              >
-                {isTestingKey ? <RefreshCw size={14} className="spin" /> : <Activity size={14} />}
-                <span>{isTestingKey ? 'Testing Connection to Google Gemini...' : 'Test Connection with Google API'}</span>
-              </button>
-
-              {testResult && (
-                <div style={{
-                  marginTop: '10px',
-                  padding: '10px 14px',
+                onClick={() => setSettingsTab('gemini')}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  padding: '7px 14px',
                   borderRadius: '8px',
-                  fontSize: '0.78rem',
-                  background: testResult.success ? '#ECFDF5' : '#FEF2F2',
-                  border: `1px solid ${testResult.success ? '#A7F3D0' : '#FECACA'}`,
-                  color: testResult.success ? 'var(--accent-forest)' : '#DC2626'
-                }}>
-                  <strong>{testResult.success ? '✅ Success:' : '❌ Warning:'}</strong> {testResult.message}
-                </div>
-              )}
+                  border: 'none',
+                  fontSize: '0.8rem',
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                  background: settingsTab === 'gemini' ? '#ECFDF5' : 'transparent',
+                  color: settingsTab === 'gemini' ? 'var(--accent-forest)' : 'var(--text-secondary)',
+                  borderBottom: settingsTab === 'gemini' ? '2px solid var(--accent-emerald)' : '2px solid transparent'
+                }}
+              >
+                <Key size={14} /> Google Gemini AI
+              </button>
+              <button
+                onClick={() => setSettingsTab('supabase')}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  padding: '7px 14px',
+                  borderRadius: '8px',
+                  border: 'none',
+                  fontSize: '0.8rem',
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                  background: settingsTab === 'supabase' ? '#ECFDF5' : 'transparent',
+                  color: settingsTab === 'supabase' ? 'var(--accent-forest)' : 'var(--text-secondary)',
+                  borderBottom: settingsTab === 'supabase' ? '2px solid var(--accent-emerald)' : '2px solid transparent'
+                }}
+              >
+                <Database size={14} /> Supabase Database {dbStats.isConfigured ? '🟢' : '🟡'}
+              </button>
             </div>
 
-            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
-              <button onClick={() => setShowSettings(false)} className="btn-secondary" style={{ fontSize: '0.8rem' }}>
-                Cancel
-              </button>
-              <button onClick={handleSaveApiKey} className="btn-primary" style={{ fontSize: '0.8rem' }}>
-                Save Settings
-              </button>
-            </div>
+            {settingsTab === 'gemini' ? (
+              <div>
+                <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '14px', lineHeight: '1.5' }}>
+                  Enter your Google Gemini API key (from <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer" style={{ color: 'var(--accent-forest)', textDecoration: 'underline' }}>Google AI Studio</a>).
+                  GridMind will automatically use Gemini 2.0 Flash / 1.5 Flash with image vision, trained knowledge base injection, and automatic model failover.
+                </p>
+
+                <div style={{ marginBottom: '14px' }}>
+                  <label style={{ fontSize: '0.75rem', fontWeight: 700, color: 'var(--text-primary)', display: 'block', marginBottom: '6px' }}>
+                    Gemini API Key:
+                  </label>
+                  <input
+                    type="password"
+                    value={apiKeyInput}
+                    onChange={(e) => {
+                      setApiKeyInput(e.target.value);
+                      setTestResult(null);
+                    }}
+                    placeholder="AIzaSy..."
+                    style={{
+                      width: '100%',
+                      padding: '10px 12px',
+                      borderRadius: '8px',
+                      border: '1px solid var(--border-subtle)',
+                      background: '#F8FAFC',
+                      fontSize: '0.85rem',
+                      outline: 'none',
+                      fontFamily: 'monospace'
+                    }}
+                  />
+                </div>
+
+                <div style={{ marginBottom: '14px' }}>
+                  <label style={{ fontSize: '0.75rem', fontWeight: 700, color: 'var(--text-primary)', display: 'block', marginBottom: '6px' }}>
+                    Active Gemini Model:
+                  </label>
+                  <select
+                    value={selectedModel}
+                    onChange={(e) => {
+                      setSelectedModel(e.target.value);
+                      setTestResult(null);
+                    }}
+                    style={{
+                      width: '100%',
+                      padding: '9px 12px',
+                      borderRadius: '8px',
+                      border: '1px solid var(--border-subtle)',
+                      background: '#FFFFFF',
+                      fontSize: '0.82rem',
+                      outline: 'none',
+                      color: 'var(--text-primary)',
+                      fontWeight: 600,
+                      cursor: 'pointer'
+                    }}
+                  >
+                    {AVAILABLE_MODELS.map(m => (
+                      <option key={m.id} value={m.id}>
+                        {m.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div style={{ marginBottom: '16px' }}>
+                  <button
+                    onClick={handleTestApiKey}
+                    disabled={isTestingKey || !apiKeyInput.trim()}
+                    className="btn-secondary"
+                    style={{ fontSize: '0.78rem', padding: '6px 12px', width: '100%', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '6px' }}
+                  >
+                    {isTestingKey ? <RefreshCw size={14} className="spin" /> : <Activity size={14} />}
+                    <span>{isTestingKey ? 'Testing Connection to Google Gemini...' : 'Test Connection with Google API'}</span>
+                  </button>
+
+                  {testResult && (
+                    <div style={{
+                      marginTop: '10px',
+                      padding: '10px 14px',
+                      borderRadius: '8px',
+                      fontSize: '0.78rem',
+                      background: testResult.success ? '#ECFDF5' : '#FEF2F2',
+                      border: `1px solid ${testResult.success ? '#A7F3D0' : '#FECACA'}`,
+                      color: testResult.success ? 'var(--accent-forest)' : '#DC2626'
+                    }}>
+                      <strong>{testResult.success ? '✅ Success:' : '❌ Warning:'}</strong> {testResult.message}
+                    </div>
+                  )}
+                </div>
+
+                <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
+                  <button onClick={() => setShowSettings(false)} className="btn-secondary" style={{ fontSize: '0.8rem' }}>
+                    Cancel
+                  </button>
+                  <button onClick={handleSaveApiKey} className="btn-primary" style={{ fontSize: '0.8rem' }}>
+                    Save Gemini Settings
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div>
+                <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '14px', lineHeight: '1.5' }}>
+                  Connect your <a href="https://supabase.com/dashboard" target="_blank" rel="noreferrer" style={{ color: 'var(--accent-forest)', textDecoration: 'underline' }}>Supabase PostgreSQL</a> database to store and sync all training data (topics, files, tariffs) in the cloud.
+                </p>
+
+                <div style={{ marginBottom: '12px' }}>
+                  <label style={{ fontSize: '0.75rem', fontWeight: 700, color: 'var(--text-primary)', display: 'block', marginBottom: '4px' }}>
+                    Supabase Project URL:
+                  </label>
+                  <input
+                    type="text"
+                    value={supabaseUrlInput}
+                    onChange={(e) => {
+                      setSupabaseUrlInput(e.target.value);
+                      setSupabaseTestStatus(null);
+                    }}
+                    placeholder="https://your-project.supabase.co"
+                    style={{
+                      width: '100%',
+                      padding: '9px 12px',
+                      borderRadius: '8px',
+                      border: '1px solid var(--border-subtle)',
+                      background: '#F8FAFC',
+                      fontSize: '0.83rem',
+                      outline: 'none',
+                      fontFamily: 'monospace'
+                    }}
+                  />
+                </div>
+
+                <div style={{ marginBottom: '14px' }}>
+                  <label style={{ fontSize: '0.75rem', fontWeight: 700, color: 'var(--text-primary)', display: 'block', marginBottom: '4px' }}>
+                    Supabase Anon / Public Key:
+                  </label>
+                  <input
+                    type="password"
+                    value={supabaseKeyInput}
+                    onChange={(e) => {
+                      setSupabaseKeyInput(e.target.value);
+                      setSupabaseTestStatus(null);
+                    }}
+                    placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+                    style={{
+                      width: '100%',
+                      padding: '9px 12px',
+                      borderRadius: '8px',
+                      border: '1px solid var(--border-subtle)',
+                      background: '#F8FAFC',
+                      fontSize: '0.83rem',
+                      outline: 'none',
+                      fontFamily: 'monospace'
+                    }}
+                  />
+                </div>
+
+                {/* Supabase Test & Status Banner */}
+                <div style={{ marginBottom: '14px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                  <div style={{ display: 'flex', gap: '8px' }}>
+                    <button
+                      onClick={handleTestSupabase}
+                      disabled={isTestingSupabase || !supabaseUrlInput.trim() || !supabaseKeyInput.trim()}
+                      className="btn-secondary"
+                      style={{ fontSize: '0.78rem', padding: '6px 12px', flex: 1, display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '6px' }}
+                    >
+                      {isTestingSupabase ? <RefreshCw size={14} className="spin" /> : <Activity size={14} />}
+                      <span>{isTestingSupabase ? 'Testing Connection…' : 'Test Supabase Connection'}</span>
+                    </button>
+
+                    {dbStats.isConfigured && (
+                      <button
+                        onClick={handleDisconnectSupabase}
+                        className="btn-secondary"
+                        style={{ fontSize: '0.76rem', color: '#DC2626', borderColor: '#FECACA' }}
+                        title="Disconnect Supabase"
+                      >
+                        Disconnect
+                      </button>
+                    )}
+                  </div>
+
+                  {supabaseTestStatus && (
+                    <div style={{
+                      padding: '10px 14px',
+                      borderRadius: '8px',
+                      fontSize: '0.78rem',
+                      background: supabaseTestStatus.success ? '#ECFDF5' : '#FEF2F2',
+                      border: `1px solid ${supabaseTestStatus.success ? '#A7F3D0' : '#FECACA'}`,
+                      color: supabaseTestStatus.success ? 'var(--accent-forest)' : '#DC2626'
+                    }}>
+                      <strong>{supabaseTestStatus.success ? '✅ Success:' : '❌ Warning:'}</strong> {supabaseTestStatus.message}
+                    </div>
+                  )}
+                </div>
+
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingTop: '8px', borderTop: '1px solid var(--border-subtle)' }}>
+                  <button
+                    onClick={handleCopySqlSchema}
+                    style={{ background: 'transparent', border: 'none', color: 'var(--accent-forest)', fontSize: '0.75rem', fontWeight: 700, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px' }}
+                  >
+                    {copiedSql ? <Check size={14} /> : <Copy size={14} />}
+                    {copiedSql ? 'SQL Schema Copied!' : 'Copy SQL Schema'}
+                  </button>
+
+                  <div style={{ display: 'flex', gap: '8px' }}>
+                    <button onClick={() => setShowSettings(false)} className="btn-secondary" style={{ fontSize: '0.8rem' }}>
+                      Cancel
+                    </button>
+                    <button onClick={handleSaveSupabaseConfig} className="btn-primary" style={{ fontSize: '0.8rem' }}>
+                      Save & Connect Supabase
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -1117,18 +1406,47 @@ export default function ChatContainer({ gridSnapshot, onTriggerGridEvent, onNavi
             overflow: 'hidden'
           }}>
             {/* Modal Header */}
-            <div style={{ padding: '16px 22px', borderBottom: '1px solid var(--border-subtle)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <div style={{ padding: '16px 22px', borderBottom: '1px solid var(--border-subtle)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '10px' }}>
               <div>
-                <h4 style={{ fontSize: '1.1rem', fontWeight: 800, color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                  <GraduationCap size={22} color="var(--accent-forest)" /> Train GridMind Knowledge Base
-                </h4>
-                <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
-                  Teach GridMind custom power plants, standards, tariffs, equipment notes, or any domain. GridMind prioritizes these topics in all answers!
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                  <h4 style={{ fontSize: '1.1rem', fontWeight: 800, color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '8px', margin: 0 }}>
+                    <GraduationCap size={22} color="var(--accent-forest)" /> Train GridMind Knowledge Base
+                  </h4>
+                  <span className={`badge ${dbStats.isConfigured ? 'badge-cyan' : 'badge-stable'}`} style={{ fontSize: '0.66rem', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                    {dbStats.isConfigured ? <Cloud size={11} /> : <HardDrive size={11} />}
+                    {dbStats.isConfigured ? `Supabase Cloud (${dbStats.cloudCount || dbStats.totalCount} topics)` : 'Local Storage Mode'}
+                  </span>
+                </div>
+                <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', margin: '4px 0 0' }}>
+                  Teach GridMind custom power plants, standards, tariffs, equipment notes, or any domain. Data persists in {dbStats.isConfigured ? 'Supabase PostgreSQL Cloud Database' : 'Local Storage'}!
                 </p>
               </div>
-              <button onClick={() => setShowTrainer(false)} style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--text-muted)' }}>
-                <X size={20} />
-              </button>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <button
+                  onClick={() => setShowDbConfig(v => !v)}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '6px',
+                    padding: '6px 12px',
+                    borderRadius: '8px',
+                    border: showDbConfig ? '1px solid var(--accent-emerald)' : '1px solid var(--border-subtle)',
+                    background: showDbConfig ? '#ECFDF5' : '#FFFFFF',
+                    color: showDbConfig ? 'var(--accent-forest)' : 'var(--text-primary)',
+                    fontSize: '0.76rem',
+                    fontWeight: 700,
+                    cursor: 'pointer',
+                    boxShadow: '0 1px 3px rgba(0,0,0,0.05)'
+                  }}
+                  title="Configure Supabase Cloud Database"
+                >
+                  <Database size={14} color="var(--accent-forest)" />
+                  <span>{showDbConfig ? 'Close DB Settings' : 'Supabase Settings'}</span>
+                </button>
+                <button onClick={() => { setShowTrainer(false); setShowDbConfig(false); }} style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--text-muted)' }}>
+                  <X size={20} />
+                </button>
+              </div>
             </div>
 
             {/* Modal Body: Split view */}
@@ -1204,11 +1522,15 @@ export default function ChatContainer({ gridSnapshot, onTriggerGridEvent, onNavi
                         </div>
                       </div>
 
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
                         <span className="badge badge-stable" style={{ fontSize: '0.62rem' }}>
                           {topic.category}
                         </span>
-                        <span style={{ fontSize: '0.65rem', color: 'var(--text-muted)' }}>
+                        <span className={`badge ${topic.source === 'cloud' || topic.source === 'supabase' ? 'badge-cyan' : 'badge-amber'}`} style={{ fontSize: '0.6rem', display: 'flex', alignItems: 'center', gap: '3px' }}>
+                          {topic.source === 'cloud' || topic.source === 'supabase' ? <Cloud size={10} /> : <HardDrive size={10} />}
+                          {topic.source === 'cloud' || topic.source === 'supabase' ? 'Supabase' : 'Local'}
+                        </span>
+                        <span style={{ fontSize: '0.65rem', color: 'var(--text-muted)', marginLeft: 'auto' }}>
                           {topic.updatedAt}
                         </span>
                       </div>
@@ -1239,225 +1561,443 @@ export default function ChatContainer({ gridSnapshot, onTriggerGridEvent, onNavi
                 </div>
               </div>
 
-              {/* Right Column: Add / Edit Topic Form */}
-              <div style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: '12px', overflowY: 'auto', minHeight: 0 }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <h5 style={{ fontSize: '0.9rem', fontWeight: 800, color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                    {editingTopicId ? <Edit2 size={15} color="var(--accent-forest)" /> : <Plus size={15} color="var(--accent-forest)" />}
-                    {editingTopicId ? 'Edit Trained Topic' : 'Train a New Topic'}
-                  </h5>
-                  {editingTopicId && (
-                    <button
-                      onClick={() => {
-                        setEditingTopicId(null);
-                        setNewTopicTitle('');
-                        setNewTopicContent('');
-                        setTrainerStatusMsg('');
-                      }}
-                      style={{ background: 'transparent', border: 'none', fontSize: '0.72rem', color: 'var(--text-muted)', cursor: 'pointer' }}
-                    >
-                      Cancel Edit
-                    </button>
-                  )}
-                </div>
-
-                {trainerStatusMsg && (
-                  <div style={{ padding: '8px 12px', borderRadius: '8px', fontSize: '0.78rem', background: trainerStatusMsg.includes('⚠️') ? '#FEF2F2' : '#ECFDF5', border: `1px solid ${trainerStatusMsg.includes('⚠️') ? '#FECACA' : '#A7F3D0'}`, color: trainerStatusMsg.includes('⚠️') ? '#DC2626' : 'var(--accent-forest)', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '6px' }}>
-                    {isProcessingTrainerFile && <RefreshCw size={13} className="spin" />}
-                    {trainerStatusMsg}
-                  </div>
-                )}
-
-                {/* ── FILE UPLOAD FOR TRAINER (ANY FILE TYPE SUPPORTED) ── */}
-                <div 
-                  onDragOver={handleTrainerDragOver}
-                  onDragLeave={handleTrainerDragLeave}
-                  onDrop={handleTrainerDrop}
-                  style={{ 
-                    padding: '16px 18px', 
-                    borderRadius: '14px', 
-                    border: isDraggingTrainerFile ? '2px dashed #059669' : '2px dashed #A7F3D0', 
-                    background: isDraggingTrainerFile ? '#ECFDF5' : 'linear-gradient(135deg, #F0FDF4 0%, #ECFDF5 100%)', 
-                    display: 'flex', 
-                    flexDirection: 'column', 
-                    gap: '10px',
-                    transition: 'all 0.2s ease',
-                    boxShadow: isDraggingTrainerFile ? '0 4px 16px rgba(16,185,129,0.2)' : 'none'
-                  }}
-                >
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '6px' }}>
+              {/* Right Column: Conditional View (Supabase Database Settings OR Topic Training Form) */}
+              {showDbConfig ? (
+                <div style={{ padding: '18px 22px', display: 'flex', flexDirection: 'column', gap: '14px', overflowY: 'auto', minHeight: 0, background: '#FFFFFF' }}>
+                  {/* Panel Header */}
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingBottom: '10px', borderBottom: '1px solid var(--border-subtle)' }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                      <FileUp size={18} color="var(--accent-forest)" />
-                      <span style={{ fontSize: '0.85rem', fontWeight: 800, color: 'var(--text-primary)' }}>Upload ANY File to Auto-Train</span>
+                      <div style={{ width: '32px', height: '32px', borderRadius: '8px', background: 'var(--accent-emerald)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                        <Database size={18} color="#FFF" />
+                      </div>
+                      <div>
+                        <h5 style={{ fontSize: '0.95rem', fontWeight: 800, color: 'var(--text-primary)', margin: 0 }}>
+                          Supabase Database Configuration
+                        </h5>
+                        <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>
+                          PostgreSQL persistence for training data across all sessions & devices
+                        </span>
+                      </div>
                     </div>
-                    <span style={{ fontSize: '0.66rem', color: '#047857', background: '#DCFCE7', border: '1px solid #86EFAC', padding: '2px 8px', borderRadius: '12px', fontWeight: 700 }}>
-                      Supports ANY File Format
-                    </span>
+                    <button
+                      onClick={() => setShowDbConfig(false)}
+                      className="btn-secondary"
+                      style={{ fontSize: '0.74rem', padding: '5px 10px' }}
+                    >
+                      Back to Training
+                    </button>
                   </div>
 
-                  <p style={{ fontSize: '0.74rem', color: 'var(--text-secondary)', margin: 0, lineHeight: '1.45' }}>
-                    Drag & drop or browse <strong>ANY</strong> file type — CSV, PDF, Word (.docx), Excel (.xlsx), Text (.txt, .md), JSON, YAML, Logs, Images (.png, .jpg), Code, or Engineering Specs. Knowledge is automatically extracted and indexed into GridMind!
-                  </p>
+                  {/* Current Connection Status Box */}
+                  <div style={{
+                    padding: '12px 14px',
+                    borderRadius: '10px',
+                    background: dbStats.isConfigured ? 'linear-gradient(135deg, #ECFDF5 0%, #F0FDF4 100%)' : '#F8FAFC',
+                    border: `1px solid ${dbStats.isConfigured ? '#A7F3D0' : 'var(--border-subtle)'}`,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    flexWrap: 'wrap',
+                    gap: '10px'
+                  }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                      {dbStats.isConfigured ? <Cloud size={20} color="var(--accent-forest)" /> : <HardDrive size={20} color="var(--accent-amber)" />}
+                      <div>
+                        <strong style={{ fontSize: '0.8rem', color: 'var(--text-primary)' }}>
+                          Status: {dbStats.isConfigured ? 'Connected to Supabase PostgreSQL' : 'Local Storage Mode (Browser Cache)'}
+                        </strong>
+                        <span style={{ display: 'block', fontSize: '0.7rem', color: 'var(--text-muted)' }}>
+                          {dbStats.isConfigured 
+                            ? `${dbStats.cloudCount || dbStats.totalCount} topics stored in cloud table "trained_topics"`
+                            : 'Knowledge is currently saved in this browser. Connect Supabase to store permanently in cloud.'}
+                        </span>
+                      </div>
+                    </div>
 
-                  <input 
-                    type="file" 
-                    ref={trainerFileInputRef} 
-                    onChange={handleTrainerFileUpload} 
-                    accept="*" 
-                    style={{ display: 'none' }} 
-                  />
+                    {dbStats.isConfigured && (
+                      <button
+                        onClick={handleSyncLocalToSupabase}
+                        disabled={isSyncingSupabase}
+                        className="btn-primary"
+                        style={{ fontSize: '0.74rem', padding: '6px 12px', display: 'flex', alignItems: 'center', gap: '5px' }}
+                      >
+                        {isSyncingSupabase ? <RefreshCw size={13} className="spin" /> : <Cloud size={13} />}
+                        <span>{isSyncingSupabase ? 'Syncing…' : 'Push Local to Supabase'}</span>
+                      </button>
+                    )}
+                  </div>
 
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
-                    <button
-                      onClick={() => trainerFileInputRef.current?.click()}
-                      disabled={isProcessingTrainerFile}
-                      style={{ 
-                        background: isProcessingTrainerFile ? '#9CA3AF' : 'linear-gradient(135deg, #059669, #10B981)', 
-                        color: '#fff', 
-                        border: 'none', 
-                        borderRadius: '8px', 
-                        padding: '8px 16px', 
-                        fontSize: '0.8rem', 
-                        fontWeight: 700, 
-                        cursor: isProcessingTrainerFile ? 'not-allowed' : 'pointer', 
-                        display: 'flex', 
-                        alignItems: 'center', 
-                        gap: '6px',
-                        boxShadow: '0 2px 6px rgba(16,185,129,0.25)'
-                      }}
-                    >
-                      {isProcessingTrainerFile ? <><RefreshCw size={14} className="spin" /> Reading & Extracting…</> : <><FolderOpen size={14} /> Choose Any File</>}
-                    </button>
+                  {/* URL & Anon Key Inputs */}
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                    <div>
+                      <label style={{ fontSize: '0.74rem', fontWeight: 700, color: 'var(--text-primary)', display: 'block', marginBottom: '4px' }}>
+                        Supabase Project URL:
+                      </label>
+                      <input
+                        type="text"
+                        value={supabaseUrlInput}
+                        onChange={(e) => {
+                          setSupabaseUrlInput(e.target.value);
+                          setSupabaseTestStatus(null);
+                        }}
+                        placeholder="https://your-project-id.supabase.co"
+                        style={{
+                          width: '100%',
+                          padding: '8px 11px',
+                          borderRadius: '8px',
+                          border: '1px solid var(--border-subtle)',
+                          background: '#F8FAFC',
+                          fontSize: '0.82rem',
+                          outline: 'none',
+                          fontFamily: 'monospace'
+                        }}
+                      />
+                    </div>
 
-                    <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
-                      or drag & drop here
-                    </span>
+                    <div>
+                      <label style={{ fontSize: '0.74rem', fontWeight: 700, color: 'var(--text-primary)', display: 'block', marginBottom: '4px' }}>
+                        Supabase Anon / Public Key:
+                      </label>
+                      <input
+                        type="password"
+                        value={supabaseKeyInput}
+                        onChange={(e) => {
+                          setSupabaseKeyInput(e.target.value);
+                          setSupabaseTestStatus(null);
+                        }}
+                        placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+                        style={{
+                          width: '100%',
+                          padding: '8px 11px',
+                          borderRadius: '8px',
+                          border: '1px solid var(--border-subtle)',
+                          background: '#F8FAFC',
+                          fontSize: '0.82rem',
+                          outline: 'none',
+                          fontFamily: 'monospace'
+                        }}
+                      />
+                    </div>
 
-                    {trainerFile && (
-                      <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: '8px', background: '#FFFFFF', padding: '6px 12px', borderRadius: '8px', border: '1px solid #86EFAC', boxShadow: '0 1px 3px rgba(0,0,0,0.05)' }}>
-                        <FileText size={15} color="var(--accent-forest)" />
-                        <div style={{ display: 'flex', flexDirection: 'column' }}>
-                          <span style={{ fontSize: '0.74rem', fontWeight: 700, color: 'var(--text-primary)', maxWidth: '180px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                            {trainerFile.name}
-                          </span>
-                          <span style={{ fontSize: '0.64rem', color: 'var(--text-muted)' }}>
-                            {trainerFile.type} • {trainerFile.sizeKb} KB
-                          </span>
-                        </div>
-                        <button onClick={() => setTrainerFile(null)} style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', padding: '2px' }} title="Remove file">
-                          <X size={13} />
+                    {/* Action Buttons */}
+                    <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginTop: '2px' }}>
+                      <button
+                        onClick={handleTestSupabase}
+                        disabled={isTestingSupabase || !supabaseUrlInput.trim() || !supabaseKeyInput.trim()}
+                        className="btn-secondary"
+                        style={{ fontSize: '0.76rem', padding: '6px 12px', flex: 1, display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '6px' }}
+                      >
+                        {isTestingSupabase ? <RefreshCw size={13} className="spin" /> : <Activity size={13} />}
+                        <span>{isTestingSupabase ? 'Testing Connection…' : 'Test Connection'}</span>
+                      </button>
+
+                      <button
+                        onClick={handleSaveSupabaseConfig}
+                        disabled={!supabaseUrlInput.trim() || !supabaseKeyInput.trim()}
+                        className="btn-primary"
+                        style={{ fontSize: '0.76rem', padding: '6px 14px', display: 'flex', alignItems: 'center', gap: '5px' }}
+                      >
+                        <Check size={14} /> Save & Connect
+                      </button>
+
+                      {dbStats.isConfigured && (
+                        <button
+                          onClick={handleDisconnectSupabase}
+                          className="btn-secondary"
+                          style={{ fontSize: '0.74rem', color: '#DC2626', borderColor: '#FECACA' }}
+                          title="Disconnect Supabase"
+                        >
+                          Disconnect
                         </button>
+                      )}
+                    </div>
+
+                    {/* Test Status Banner */}
+                    {supabaseTestStatus && (
+                      <div style={{
+                        padding: '10px 14px',
+                        borderRadius: '8px',
+                        fontSize: '0.78rem',
+                        background: supabaseTestStatus.success ? '#ECFDF5' : '#FEF2F2',
+                        border: `1px solid ${supabaseTestStatus.success ? '#A7F3D0' : '#FECACA'}`,
+                        color: supabaseTestStatus.success ? 'var(--accent-forest)' : '#DC2626',
+                        lineHeight: '1.4'
+                      }}>
+                        <strong>{supabaseTestStatus.success ? '✅ Success:' : '❌ Notice:'}</strong> {supabaseTestStatus.message}
                       </div>
                     )}
                   </div>
-                </div>
 
-                <div>
-                  <label style={{ fontSize: '0.72rem', fontWeight: 700, color: 'var(--text-primary)', display: 'block', marginBottom: '4px' }}>
-                    Topic Title:
-                  </label>
-                  <input
-                    type="text"
-                    value={newTopicTitle}
-                    onChange={(e) => setNewTopicTitle(e.target.value)}
-                    placeholder="e.g., Payra 1320MW Thermal Plant Specifications"
-                    style={{
-                      width: '100%',
-                      padding: '8px 10px',
-                      borderRadius: '8px',
-                      border: '1px solid var(--border-subtle)',
-                      background: '#FFFFFF',
-                      fontSize: '0.82rem',
-                      outline: 'none'
-                    }}
-                  />
-                </div>
-
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
-                  <div>
-                    <label style={{ fontSize: '0.72rem', fontWeight: 700, color: 'var(--text-primary)', display: 'block', marginBottom: '4px' }}>
-                      Category:
-                    </label>
-                    <input
-                      type="text"
-                      value={newTopicCategory}
-                      onChange={(e) => setNewTopicCategory(e.target.value)}
-                      placeholder="e.g., Power Plant, Tariffs, SCADA"
-                      style={{
-                        width: '100%',
-                        padding: '8px 10px',
-                        borderRadius: '8px',
-                        border: '1px solid var(--border-subtle)',
-                        background: '#FFFFFF',
-                        fontSize: '0.82rem',
-                        outline: 'none'
-                      }}
-                    />
-                  </div>
-
-                  <div>
-                    <label style={{ fontSize: '0.72rem', fontWeight: 700, color: 'var(--text-primary)', display: 'block', marginBottom: '4px' }}>
-                      Tags (comma-separated):
-                    </label>
-                    <input
-                      type="text"
-                      value={newTopicTags}
-                      onChange={(e) => setNewTopicTags(e.target.value)}
-                      placeholder="e.g., coal, payra, 1320mw, ultra-supercritical"
-                      style={{
-                        width: '100%',
-                        padding: '8px 10px',
-                        borderRadius: '8px',
-                        border: '1px solid var(--border-subtle)',
-                        background: '#FFFFFF',
-                        fontSize: '0.82rem',
-                        outline: 'none'
-                      }}
-                    />
-                  </div>
-                </div>
-
-                <div style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
-                  <label style={{ fontSize: '0.72rem', fontWeight: 700, color: 'var(--text-primary)', display: 'block', marginBottom: '4px' }}>
-                    Training Notes, Facts, Formulas & Rules (Markdown Supported):
-                  </label>
-                  <textarea
-                    rows={8}
-                    value={newTopicContent}
-                    onChange={(e) => setNewTopicContent(e.target.value)}
-                    placeholder="Type detailed facts, equipment ratings, tariff rates, or operating rules. When asked, GridMind will respond accurately using this knowledge..."
-                    style={{
-                      width: '100%',
-                      flex: 1,
-                      padding: '10px 12px',
-                      borderRadius: '8px',
-                      border: '1px solid var(--border-subtle)',
-                      background: '#FFFFFF',
-                      fontSize: '0.82rem',
-                      lineHeight: '1.5',
-                      outline: 'none',
-                      resize: 'vertical',
-                      fontFamily: 'var(--font-body)'
-                    }}
-                  />
-                </div>
-
-                <button
-                  onClick={handleSaveTopic}
-                  className="btn-primary"
-                  style={{
-                    padding: '8px 16px',
-                    fontSize: '0.82rem',
-                    fontWeight: 700,
+                  {/* Database Schema Setup & Quick Copy */}
+                  <div style={{
+                    marginTop: 'auto',
+                    padding: '12px 14px',
+                    borderRadius: '10px',
+                    background: '#F8FAFC',
+                    border: '1px solid var(--border-subtle)',
                     display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
+                    flexDirection: 'column',
                     gap: '6px'
-                  }}
-                >
-                  <Check size={16} /> {editingTopicId ? 'Update Trained Topic' : 'Save & Train Topic'}
-                </button>
-              </div>
+                  }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span style={{ fontSize: '0.76rem', fontWeight: 700, color: 'var(--text-primary)' }}>
+                        PostgreSQL Table Schema
+                      </span>
+                      <a
+                        href="https://supabase.com/dashboard"
+                        target="_blank"
+                        rel="noreferrer"
+                        style={{ fontSize: '0.7rem', color: 'var(--accent-forest)', textDecoration: 'none', display: 'flex', alignItems: 'center', gap: '3px', fontWeight: 600 }}
+                      >
+                        <span>Open Supabase Console</span>
+                        <ExternalLink size={11} />
+                      </a>
+                    </div>
+
+                    <p style={{ fontSize: '0.7rem', color: 'var(--text-muted)', margin: 0 }}>
+                      Run in your Supabase project (Dashboard &gt; SQL Editor). Creates <code>trained_topics</code> with RLS and search indexes:
+                    </p>
+
+                    <button
+                      onClick={handleCopySqlSchema}
+                      className="btn-secondary"
+                      style={{
+                        alignSelf: 'flex-start',
+                        fontSize: '0.74rem',
+                        padding: '5px 12px',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '6px',
+                        background: copiedSql ? '#ECFDF5' : '#FFFFFF',
+                        color: copiedSql ? 'var(--accent-forest)' : 'var(--text-primary)',
+                        borderColor: copiedSql ? 'var(--accent-emerald)' : 'var(--border-subtle)'
+                      }}
+                    >
+                      {copiedSql ? <Check size={13} color="var(--accent-forest)" /> : <Copy size={13} />}
+                      <span>{copiedSql ? 'SQL Copied to Clipboard!' : 'Copy SQL Schema Script'}</span>
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: '12px', overflowY: 'auto', minHeight: 0 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <h5 style={{ fontSize: '0.9rem', fontWeight: 800, color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      {editingTopicId ? <Edit2 size={15} color="var(--accent-forest)" /> : <Plus size={15} color="var(--accent-forest)" />}
+                      {editingTopicId ? 'Edit Trained Topic' : 'Train a New Topic'}
+                    </h5>
+                    {editingTopicId && (
+                      <button
+                        onClick={() => {
+                          setEditingTopicId(null);
+                          setNewTopicTitle('');
+                          setNewTopicContent('');
+                          setTrainerStatusMsg('');
+                        }}
+                        style={{ background: 'transparent', border: 'none', fontSize: '0.72rem', color: 'var(--text-muted)', cursor: 'pointer' }}
+                      >
+                        Cancel Edit
+                      </button>
+                    )}
+                  </div>
+
+                  {trainerStatusMsg && (
+                    <div style={{ padding: '8px 12px', borderRadius: '8px', fontSize: '0.78rem', background: trainerStatusMsg.includes('⚠️') ? '#FEF2F2' : '#ECFDF5', border: `1px solid ${trainerStatusMsg.includes('⚠️') ? '#FECACA' : '#A7F3D0'}`, color: trainerStatusMsg.includes('⚠️') ? '#DC2626' : 'var(--accent-forest)', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      {isProcessingTrainerFile && <RefreshCw size={13} className="spin" />}
+                      {trainerStatusMsg}
+                    </div>
+                  )}
+
+                  {/* ── FILE UPLOAD FOR TRAINER (ANY FILE TYPE SUPPORTED) ── */}
+                  <div 
+                    onDragOver={handleTrainerDragOver}
+                    onDragLeave={handleTrainerDragLeave}
+                    onDrop={handleTrainerDrop}
+                    style={{ 
+                      padding: '16px 18px', 
+                      borderRadius: '14px', 
+                      border: isDraggingTrainerFile ? '2px dashed #059669' : '2px dashed #A7F3D0', 
+                      background: isDraggingTrainerFile ? '#ECFDF5' : 'linear-gradient(135deg, #F0FDF4 0%, #ECFDF5 100%)', 
+                      display: 'flex', 
+                      flexDirection: 'column', 
+                      gap: '10px',
+                      transition: 'all 0.2s ease',
+                      boxShadow: isDraggingTrainerFile ? '0 4px 16px rgba(16,185,129,0.2)' : 'none'
+                    }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '6px' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <FileUp size={18} color="var(--accent-forest)" />
+                        <span style={{ fontSize: '0.85rem', fontWeight: 800, color: 'var(--text-primary)' }}>Upload ANY File to Auto-Train</span>
+                      </div>
+                      <span style={{ fontSize: '0.66rem', color: '#047857', background: '#DCFCE7', border: '1px solid #86EFAC', padding: '2px 8px', borderRadius: '12px', fontWeight: 700 }}>
+                        Supports ANY File Format
+                      </span>
+                    </div>
+
+                    <p style={{ fontSize: '0.74rem', color: 'var(--text-secondary)', margin: 0, lineHeight: '1.45' }}>
+                      Drag & drop or browse <strong>ANY</strong> file type — CSV, PDF, Word (.docx), Excel (.xlsx), Text (.txt, .md), JSON, YAML, Logs, Images (.png, .jpg), Code, or Engineering Specs. Knowledge is automatically extracted and indexed into GridMind!
+                    </p>
+
+                    <input 
+                      type="file" 
+                      ref={trainerFileInputRef} 
+                      onChange={handleTrainerFileUpload} 
+                      accept="*" 
+                      style={{ display: 'none' }} 
+                    />
+
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+                      <button
+                        onClick={() => trainerFileInputRef.current?.click()}
+                        disabled={isProcessingTrainerFile}
+                        style={{ 
+                          background: isProcessingTrainerFile ? '#9CA3AF' : 'linear-gradient(135deg, #059669, #10B981)', 
+                          color: '#fff', 
+                          border: 'none', 
+                          borderRadius: '8px', 
+                          padding: '8px 16px', 
+                          fontSize: '0.8rem', 
+                          fontWeight: 700, 
+                          cursor: isProcessingTrainerFile ? 'not-allowed' : 'pointer', 
+                          display: 'flex', 
+                          alignItems: 'center', 
+                          gap: '6px',
+                          boxShadow: '0 2px 6px rgba(16,185,129,0.25)'
+                        }}
+                      >
+                        {isProcessingTrainerFile ? <><RefreshCw size={14} className="spin" /> Reading & Extracting…</> : <><FolderOpen size={14} /> Choose Any File</>}
+                      </button>
+
+                      <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+                        or drag & drop here
+                      </span>
+
+                      {trainerFile && (
+                        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: '8px', background: '#FFFFFF', padding: '6px 12px', borderRadius: '8px', border: '1px solid #86EFAC', boxShadow: '0 1px 3px rgba(0,0,0,0.05)' }}>
+                          <FileText size={15} color="var(--accent-forest)" />
+                          <div style={{ display: 'flex', flexDirection: 'column' }}>
+                            <span style={{ fontSize: '0.74rem', fontWeight: 700, color: 'var(--text-primary)', maxWidth: '180px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                              {trainerFile.name}
+                            </span>
+                            <span style={{ fontSize: '0.64rem', color: 'var(--text-muted)' }}>
+                              {trainerFile.type} • {trainerFile.sizeKb} KB
+                            </span>
+                          </div>
+                          <button onClick={() => setTrainerFile(null)} style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', padding: '2px' }} title="Remove file">
+                            <X size={13} />
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  <div>
+                    <label style={{ fontSize: '0.72rem', fontWeight: 700, color: 'var(--text-primary)', display: 'block', marginBottom: '4px' }}>
+                      Topic Title:
+                    </label>
+                    <input
+                      type="text"
+                      value={newTopicTitle}
+                      onChange={(e) => setNewTopicTitle(e.target.value)}
+                      placeholder="e.g., Payra 1320MW Thermal Plant Specifications"
+                      style={{
+                        width: '100%',
+                        padding: '8px 10px',
+                        borderRadius: '8px',
+                        border: '1px solid var(--border-subtle)',
+                        background: '#FFFFFF',
+                        fontSize: '0.82rem',
+                        outline: 'none'
+                      }}
+                    />
+                  </div>
+
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+                    <div>
+                      <label style={{ fontSize: '0.72rem', fontWeight: 700, color: 'var(--text-primary)', display: 'block', marginBottom: '4px' }}>
+                        Category:
+                      </label>
+                      <input
+                        type="text"
+                        value={newTopicCategory}
+                        onChange={(e) => setNewTopicCategory(e.target.value)}
+                        placeholder="e.g., Power Plant, Tariffs, SCADA"
+                        style={{
+                          width: '100%',
+                          padding: '8px 10px',
+                          borderRadius: '8px',
+                          border: '1px solid var(--border-subtle)',
+                          background: '#FFFFFF',
+                          fontSize: '0.82rem',
+                          outline: 'none'
+                        }}
+                      />
+                    </div>
+
+                    <div>
+                      <label style={{ fontSize: '0.72rem', fontWeight: 700, color: 'var(--text-primary)', display: 'block', marginBottom: '4px' }}>
+                        Tags (comma-separated):
+                      </label>
+                      <input
+                        type="text"
+                        value={newTopicTags}
+                        onChange={(e) => setNewTopicTags(e.target.value)}
+                        placeholder="e.g., coal, payra, 1320mw, ultra-supercritical"
+                        style={{
+                          width: '100%',
+                          padding: '8px 10px',
+                          borderRadius: '8px',
+                          border: '1px solid var(--border-subtle)',
+                          background: '#FFFFFF',
+                          fontSize: '0.82rem',
+                          outline: 'none'
+                        }}
+                      />
+                    </div>
+                  </div>
+
+                  <div style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
+                    <label style={{ fontSize: '0.72rem', fontWeight: 700, color: 'var(--text-primary)', display: 'block', marginBottom: '4px' }}>
+                      Training Notes, Facts, Formulas & Rules (Markdown Supported):
+                    </label>
+                    <textarea
+                      rows={8}
+                      value={newTopicContent}
+                      onChange={(e) => setNewTopicContent(e.target.value)}
+                      placeholder="Type detailed facts, equipment ratings, tariff rates, or operating rules. When asked, GridMind will respond accurately using this knowledge..."
+                      style={{
+                        width: '100%',
+                        flex: 1,
+                        padding: '10px 12px',
+                        borderRadius: '8px',
+                        border: '1px solid var(--border-subtle)',
+                        background: '#FFFFFF',
+                        fontSize: '0.82rem',
+                        lineHeight: '1.5',
+                        outline: 'none',
+                        resize: 'vertical',
+                        fontFamily: 'var(--font-body)'
+                      }}
+                    />
+                  </div>
+
+                  <button
+                    onClick={handleSaveTopic}
+                    className="btn-primary"
+                    style={{
+                      padding: '8px 16px',
+                      fontSize: '0.82rem',
+                      fontWeight: 700,
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      gap: '6px'
+                    }}
+                  >
+                    <Check size={16} /> {editingTopicId ? 'Update Trained Topic' : (dbStats.isConfigured ? 'Save & Train Topic (Supabase Cloud)' : 'Save & Train Topic')}
+                  </button>
+                </div>
+              )}
 
             </div>
           </div>
